@@ -34,6 +34,9 @@ except ImportError:
         def __init__(self, *args, **kwargs):
             pass
 
+from azure.identity import DefaultAzureCredential, AzureCliCredential
+from azure.core.exceptions import AzureError
+
 from .utils import (
     check_if_running_in_aks,
     extract_cluster_name_from_resource_id,
@@ -53,12 +56,18 @@ class AzureMonitorMetricsConfig(BaseModel):
     cache_duration_seconds: Optional[int] = 1800
     tool_calls_return_data: bool = True
     headers: Dict = {}
+    # Internal fields for Azure authentication
+    _credential: Optional[Any] = None
+    _token_cache: Dict = {}
 
     @field_validator("azure_monitor_workspace_endpoint")
     def ensure_trailing_slash(cls, v: Optional[str]) -> Optional[str]:
         if v is not None and not v.endswith("/"):
             return v + "/"
         return v
+
+    class Config:
+        arbitrary_types_allowed = True
 
 class BaseAzureMonitorMetricsTool(Tool):
     """Base class for Azure Monitor Metrics tools."""
@@ -152,10 +161,10 @@ class CheckAzureMonitorPrometheusEnabled(BaseAzureMonitorMetricsTool):
     def __init__(self, toolset: "AzureMonitorMetricsToolset"):
         super().__init__(
             name="check_azure_monitor_prometheus_enabled",
-            description="Check if Azure Monitor managed Prometheus is enabled for the current AKS cluster",
+            description="Check if Azure Monitor managed Prometheus is enabled for the specified AKS cluster",
             parameters={
                 "cluster_resource_id": ToolParameter(
-                    description="Azure resource ID of the AKS cluster (optional, will auto-detect if not provided)",
+                    description="Azure resource ID of the AKS cluster (optional, will use configured cluster if not provided)",
                     type="string",
                     required=False,
                 ),
@@ -167,14 +176,18 @@ class CheckAzureMonitorPrometheusEnabled(BaseAzureMonitorMetricsTool):
         try:
             cluster_resource_id = params.get("cluster_resource_id")
             
-            # Auto-detect cluster resource ID if not provided
+            # Use configured cluster resource ID if not provided as parameter
+            if not cluster_resource_id and self.toolset.config:
+                cluster_resource_id = self.toolset.config.cluster_resource_id
+                
+            # Try to auto-detect as fallback (but don't require it)
             if not cluster_resource_id:
                 cluster_resource_id = get_aks_cluster_resource_id()
                 
             if not cluster_resource_id:
                 return StructuredToolResult(
                     status=ToolResultStatus.ERROR,
-                    error="Could not determine AKS cluster resource ID. Please provide cluster_resource_id parameter or ensure you are running in an AKS cluster.",
+                    error="No AKS cluster specified. Please provide cluster_resource_id parameter or configure it in your config.yaml file. See AZURE_MONITOR_SETUP_GUIDE.md for configuration instructions.",
                     params=params,
                 )
             
@@ -273,9 +286,12 @@ class ExecuteAzureMonitorPrometheusQuery(BaseAzureMonitorMetricsTool):
             
             payload = {"query": query}
             
+            # Get authenticated headers
+            headers = self.toolset._get_authenticated_headers()
+            
             response = requests.post(
                 url=url,
-                headers=self.toolset.config.headers,
+                headers=headers,
                 data=payload,
                 timeout=60
             )
@@ -424,9 +440,12 @@ class ExecuteAzureMonitorPrometheusRangeQuery(BaseAzureMonitorMetricsTool):
                 "step": step,
             }
             
+            # Get authenticated headers
+            headers = self.toolset._get_authenticated_headers()
+            
             response = requests.post(
                 url=url,
-                headers=self.toolset.config.headers,
+                headers=headers,
                 data=payload,
                 timeout=120
             )
@@ -525,6 +544,99 @@ class AzureMonitorMetricsToolset(Toolset):
         )
         self._cache = None
         self._reload_llm_instructions()
+
+    def _get_azure_access_token(self) -> Optional[str]:
+        """Get Azure access token for Azure Monitor workspace access."""
+        try:
+            if not self.config:
+                logging.debug("No config available for token acquisition")
+                return None
+                
+            # Initialize credential if not already done
+            if not self.config._credential:
+                logging.debug("Initializing credential (trying AzureCliCredential first)")
+                # Try AzureCliCredential first since we know Azure CLI is working
+                try:
+                    self.config._credential = AzureCliCredential()
+                    logging.debug("Using AzureCliCredential")
+                except Exception as cli_error:
+                    logging.debug(f"AzureCliCredential failed: {cli_error}, falling back to DefaultAzureCredential")
+                    self.config._credential = DefaultAzureCredential()
+            
+            # Check if we have a cached token that's still valid
+            current_time = time.time()
+            cache_key = "azure_monitor_token"
+            
+            if cache_key in self.config._token_cache:
+                token_info = self.config._token_cache[cache_key]
+                if current_time < token_info.get("expires_at", 0):
+                    logging.debug("Using cached token")
+                    return token_info.get("access_token")
+            
+            # Get new token - try Azure Monitor Prometheus scope first, then fallbacks
+            scopes_to_try = [
+                "https://prometheus.monitor.azure.com/.default",  # Correct Azure Monitor Prometheus scope
+                "https://management.azure.com/.default",          # General Azure management scope (fallback)
+                "https://monitor.azure.com/.default"              # Alternative Monitor scope (fallback)
+            ]
+            
+            token = None
+            last_error = None
+            
+            for scope in scopes_to_try:
+                try:
+                    logging.debug(f"Trying to get token with scope: {scope}")
+                    token = self.config._credential.get_token(scope)
+                    logging.debug(f"Successfully obtained token with scope: {scope}")
+                    break
+                except Exception as scope_error:
+                    logging.debug(f"Failed with scope {scope}: {scope_error}")
+                    last_error = scope_error
+                    continue
+            
+            if not token:
+                if last_error:
+                    raise last_error
+                else:
+                    raise Exception("Failed to get token with any scope")
+            
+            # Cache the token (expires 5 minutes before actual expiry)
+            expires_at = current_time + token.expires_on - 300
+            self.config._token_cache[cache_key] = {
+                "access_token": token.token,
+                "expires_at": expires_at
+            }
+            
+            logging.debug("Token cached successfully")
+            return token.token
+            
+        except Exception as e:
+            logging.error(f"Failed to get Azure access token: {e}")
+            return None
+
+    def _get_authenticated_headers(self) -> Dict[str, str]:
+        """Get headers with Azure authentication for API requests."""
+        headers = dict(self.config.headers) if self.config and self.config.headers else {}
+        
+        # Add default headers
+        headers.update({
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        })
+        
+        # Get and add Azure access token
+        access_token = self._get_azure_access_token()
+        if access_token:
+            headers["Authorization"] = f"Bearer {access_token}"
+        else:
+            logging.warning("No Azure access token available - requests may fail with authentication errors")
+        
+        return headers
+
+    def _update_config_headers(self):
+        """Update the config headers with authentication."""
+        if self.config:
+            self.config.headers = self._get_authenticated_headers()
 
     def _reload_llm_instructions(self):
         """Load LLM instructions from Jinja template."""

@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Azure Monitor Metrics toolset enables HolmesGPT to query Azure Monitor managed Prometheus metrics for AKS cluster analysis and troubleshooting. This toolset automatically detects AKS cluster configuration and provides filtered access to cluster-specific metrics.
+The Azure Monitor Metrics toolset enables HolmesGPT to query Azure Monitor managed Prometheus metrics for AKS cluster analysis and troubleshooting. This toolset is designed to work from external environments (such as local development machines, CI/CD pipelines, or management servers) and connects to AKS clusters remotely via Azure APIs, providing filtered access to cluster-specific metrics.
 
 ## Key Features
 
@@ -99,21 +99,21 @@ holmes ask "Show CPU usage trends over the last hour using Azure Monitor metrics
 
 ## Configuration
 
-### Automatic Configuration (Recommended)
+### Automatic Configuration
 
-The toolset automatically detects configuration when running in AKS:
+The toolset can attempt to auto-discover AKS clusters using Azure credentials:
 
 ```yaml
 # ~/.holmes/config.yaml
 toolsets:
   azuremonitor-metrics:
-    auto_detect_cluster: true  # Default
+    auto_detect_cluster: true  # Attempts auto-discovery
     cache_duration_seconds: 1800  # 30 minutes
 ```
 
-### Manual Configuration
+### Manual Configuration (Recommended)
 
-For explicit configuration or when running outside AKS:
+For reliable operation and explicit cluster targeting:
 
 ```yaml
 # ~/.holmes/config.yaml
@@ -200,10 +200,11 @@ The toolset works with standard Prometheus metrics available in Azure Monitor:
 
 ## Troubleshooting
 
-### "Not running in AKS cluster"
-- Verify you're executing from within a Kubernetes pod
-- Check Azure Instance Metadata Service accessibility
-- Consider manual configuration for non-AKS environments
+### "No AKS cluster specified"
+- Provide cluster_resource_id parameter in queries
+- Configure cluster details in config.yaml file
+- Ensure Azure credentials have access to the target cluster
+- See AZURE_MONITOR_SETUP_GUIDE.md for detailed configuration instructions
 
 ### "Azure Monitor managed Prometheus is not enabled"
 - Enable managed Prometheus in Azure portal or via CLI

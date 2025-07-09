@@ -1,4 +1,4 @@
-You have access to Azure Monitor Metrics tools for querying Azure Monitor managed Prometheus metrics from AKS clusters.
+You have access to Azure Monitor Metrics tools for querying Azure Monitor managed Prometheus metrics from AKS clusters. This toolset is designed to work from external environments (like local development machines) and connects to AKS clusters remotely via Azure APIs.
 
 ## Available Tools:
 {% for tool_name in tool_names %}
@@ -6,20 +6,25 @@ You have access to Azure Monitor Metrics tools for querying Azure Monitor manage
 {% endfor %}
 
 ## Key Capabilities:
-- Detect if running in an AKS cluster environment
-- Auto-discover AKS cluster Azure resource ID
-- Check if Azure Monitor managed Prometheus is enabled for the cluster
-- Execute PromQL queries against Azure Monitor workspace with automatic cluster filtering
+- Connect to AKS clusters from any environment with proper Azure credentials
+- Auto-discover AKS cluster configuration using Azure Resource Graph
+- Check if Azure Monitor managed Prometheus is enabled for specified clusters
+- Execute PromQL queries against Azure Monitor workspaces with automatic cluster filtering
 - Query both instant values and time-series data ranges
+- Support manual configuration for specific clusters
 
 ## Important Usage Guidelines:
 
-### 1. Setup and Detection Workflow:
-Before executing any Prometheus queries, follow this sequence:
-1. First run `check_aks_cluster_context` to verify AKS environment
-2. Then run `get_aks_cluster_resource_id` to get the cluster details
-3. Next run `check_azure_monitor_prometheus_enabled` to verify Azure Monitor setup
-4. Only after successful setup, execute Prometheus queries
+### 1. Configuration and Setup:
+The toolset works in two modes:
+- **Auto-detection**: Attempts to discover available AKS clusters using Azure credentials
+- **Manual configuration**: Uses explicitly configured cluster details from config.yaml
+
+### 2. Setup Workflow:
+To get started:
+1. Ensure Azure credentials are configured (az login or environment variables)
+2. Run `check_azure_monitor_prometheus_enabled` to verify and configure the cluster
+3. Execute Prometheus queries once the workspace is configured
 
 ### 2. Automatic Cluster Filtering:
 - All PromQL queries are automatically filtered by the cluster name using the "cluster" label
@@ -34,8 +39,9 @@ Before executing any Prometheus queries, follow this sequence:
 
 ### 4. Error Handling:
 - If Azure Monitor managed Prometheus is not enabled, guide the user to enable it in Azure portal
-- If no cluster context is detected, suggest manual configuration or running from within AKS
+- If no cluster is specified, suggest providing cluster_resource_id or configuring it in config.yaml
 - If queries return no data, check if the metric exists and cluster filtering is correct
+- For authentication issues, verify Azure credentials and permissions
 
 ### 5. Common AKS Metrics to Query:
 - `container_cpu_usage_seconds_total` - CPU usage by containers
@@ -66,4 +72,4 @@ When investigating AKS issues, consider querying:
 {% endif %}
 {% endif %}
 
-Remember: Azure Monitor managed Prometheus must be enabled on the AKS cluster for these tools to work. The toolset will automatically detect the configuration when running within an AKS environment.
+Remember: Azure Monitor managed Prometheus must be enabled on the AKS cluster for these tools to work. The toolset can work from any environment with proper Azure credentials and cluster configuration. See AZURE_MONITOR_SETUP_GUIDE.md for detailed setup instructions when running from external environments.
