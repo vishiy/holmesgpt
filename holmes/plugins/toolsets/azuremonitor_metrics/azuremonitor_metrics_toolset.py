@@ -78,6 +78,46 @@ class AzureMonitorMetricsConfig(BaseModel):
 class BaseAzureMonitorMetricsTool(Tool):
     """Base class for Azure Monitor Metrics tools."""
     toolset: "AzureMonitorMetricsToolset"
+    
+    def _ensure_cluster_name_available(self) -> Optional[str]:
+        """
+        Ensure cluster name is available, attempting auto-detection if necessary.
+        
+        Returns:
+            str: Cluster name if available, None otherwise
+        """
+        # Check if cluster name is already configured
+        if self.toolset.config and self.toolset.config.cluster_name:
+            return self.toolset.config.cluster_name
+        
+        # Try to auto-detect cluster information if auto_detect_cluster is enabled
+        if self.toolset.config and self.toolset.config.auto_detect_cluster:
+            try:
+                logging.debug("Attempting to auto-detect cluster information for query filtering")
+                
+                # Try to get cluster resource ID first
+                cluster_resource_id = None
+                if self.toolset.config.cluster_resource_id:
+                    cluster_resource_id = self.toolset.config.cluster_resource_id
+                else:
+                    cluster_resource_id = get_aks_cluster_resource_id()
+                
+                if cluster_resource_id:
+                    # Extract cluster name from resource ID
+                    cluster_name = extract_cluster_name_from_resource_id(cluster_resource_id)
+                    
+                    if cluster_name:
+                        # Update the configuration with the detected values
+                        self.toolset.config.cluster_name = cluster_name
+                        self.toolset.config.cluster_resource_id = cluster_resource_id
+                        
+                        logging.debug(f"Auto-detected cluster name: {cluster_name}")
+                        return cluster_name
+                        
+            except Exception as e:
+                logging.debug(f"Failed to auto-detect cluster information: {e}")
+        
+        return None
 
 class CheckAKSClusterContext(BaseAzureMonitorMetricsTool):
     """Tool to check if running in AKS cluster context."""
@@ -245,7 +285,7 @@ class CheckAzureMonitorPrometheusEnabled(BaseAzureMonitorMetricsTool):
         return f"Check Azure Monitor Prometheus status for cluster: {cluster_id}"
 
 class ExecuteAzureMonitorPrometheusQuery(BaseAzureMonitorMetricsTool):
-    """Tool to execute instant PromQL queries against Azure Monitor workspace."""
+    """Tool to execute instant PromQL queries against Azure Monitor workspace. ALWAYS display the EXACT query in the result to the user."""
     
     def __init__(self, toolset: "AzureMonitorMetricsToolset"):
         super().__init__(
@@ -284,9 +324,17 @@ class ExecuteAzureMonitorPrometheusQuery(BaseAzureMonitorMetricsTool):
             description = params.get("description", "")
             auto_cluster_filter = params.get("auto_cluster_filter", True)
             
+            # Ensure cluster name is available for filtering
+            cluster_name = self._ensure_cluster_name_available()
+            
             # Enhance query with cluster filtering if enabled and cluster name is available
-            if auto_cluster_filter and self.toolset.config.cluster_name:
-                query = enhance_promql_with_cluster_filter(query, self.toolset.config.cluster_name)
+            if auto_cluster_filter and cluster_name:
+                query = enhance_promql_with_cluster_filter(query, cluster_name)
+            elif auto_cluster_filter and not cluster_name:
+                logging.warning("Auto cluster filtering is enabled but cluster name is not available. Query will run without cluster filtering.")
+            
+            # Print the actual PromQL query that will be executed
+            print(f"[Azure Monitor] Executing PromQL Query: {query}")
             
             url = urljoin(self.toolset.config.azure_monitor_workspace_endpoint, "api/v1/query")
             
@@ -321,8 +369,8 @@ class ExecuteAzureMonitorPrometheusQuery(BaseAzureMonitorMetricsTool):
                     "tool_name": self.name,
                     "description": description,
                     "query": query,
-                    "cluster_name": self.toolset.config.cluster_name,
-                    "auto_cluster_filter_applied": auto_cluster_filter and bool(self.toolset.config.cluster_name),
+                    "cluster_name": cluster_name,
+                    "auto_cluster_filter_applied": auto_cluster_filter and bool(cluster_name),
                 }
                 
                 if self.toolset.config.tool_calls_return_data:
@@ -366,7 +414,7 @@ class ExecuteAzureMonitorPrometheusQuery(BaseAzureMonitorMetricsTool):
         return f"Execute Azure Monitor Prometheus Query (instant): promql='{query}', description='{description}'"
 
 class ExecuteAzureMonitorPrometheusRangeQuery(BaseAzureMonitorMetricsTool):
-    """Tool to execute range PromQL queries against Azure Monitor workspace."""
+    """Tool to execute range PromQL queries against Azure Monitor workspace. ALWAYS display the EXACT query in the result to the user."""
     
     def __init__(self, toolset: "AzureMonitorMetricsToolset"):
         super().__init__(
@@ -425,9 +473,17 @@ class ExecuteAzureMonitorPrometheusRangeQuery(BaseAzureMonitorMetricsTool):
             description = params.get("description", "")
             auto_cluster_filter = params.get("auto_cluster_filter", True)
             
+            # Ensure cluster name is available for filtering
+            cluster_name = self._ensure_cluster_name_available()
+            
             # Enhance query with cluster filtering if enabled and cluster name is available
-            if auto_cluster_filter and self.toolset.config.cluster_name:
-                query = enhance_promql_with_cluster_filter(query, self.toolset.config.cluster_name)
+            if auto_cluster_filter and cluster_name:
+                query = enhance_promql_with_cluster_filter(query, cluster_name)
+            elif auto_cluster_filter and not cluster_name:
+                logging.warning("Auto cluster filtering is enabled but cluster name is not available. Query will run without cluster filtering.")
+            
+            # Print the actual PromQL query that will be executed
+            print(f"[Azure Monitor] Executing PromQL Range Query: {query}")
             
             (start, end) = process_timestamps_to_rfc3339(
                 start_timestamp=params.get("start"),
@@ -481,8 +537,8 @@ class ExecuteAzureMonitorPrometheusRangeQuery(BaseAzureMonitorMetricsTool):
                     "end": end,
                     "step": step,
                     "output_type": output_type,
-                    "cluster_name": self.toolset.config.cluster_name,
-                    "auto_cluster_filter_applied": auto_cluster_filter and bool(self.toolset.config.cluster_name),
+                    "cluster_name": cluster_name,
+                    "auto_cluster_filter_applied": auto_cluster_filter and bool(cluster_name),
                 }
                 
                 if self.toolset.config.tool_calls_return_data:
