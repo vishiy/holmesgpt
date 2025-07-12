@@ -10,6 +10,8 @@ from urllib.parse import urljoin
 import requests
 from pydantic import BaseModel, field_validator
 from requests import RequestException
+from datetime import datetime
+import dateutil.parser
 
 from holmes.core.tools import (
     CallablePrerequisite,
@@ -56,6 +58,10 @@ class AzureMonitorMetricsConfig(BaseModel):
     cache_duration_seconds: Optional[int] = 1800
     tool_calls_return_data: bool = True
     headers: Dict = {}
+    # Step size and data limiting configuration
+    default_step_seconds: int = 3600  # 1 hour default step size
+    min_step_seconds: int = 60       # Minimum 1 minute step size
+    max_data_points: int = 1000      # Maximum data points per query
     # Internal fields for Azure authentication
     _credential: Optional[Any] = None
     _token_cache: Dict = {}
@@ -388,9 +394,9 @@ class ExecuteAzureMonitorPrometheusRangeQuery(BaseAzureMonitorMetricsTool):
                     required=False,
                 ),
                 "step": ToolParameter(
-                    description="Query resolution step width in duration format or float number of seconds",
+                    description="Query resolution step width in duration format or float number of seconds. If not provided, defaults to 1 hour (3600 seconds) to limit data volume and prevent token throttling.",
                     type="number",
-                    required=True,
+                    required=False,
                 ),
                 "output_type": ToolParameter(
                     description="Specifies how to interpret the Prometheus result. Use 'Plain' for raw values, 'Bytes' to format byte values, 'Percentage' to scale 0–1 values into 0–100%, or 'CPUUsage' to convert values to cores (e.g., 500 becomes 500m, 2000 becomes 2).",
@@ -428,7 +434,9 @@ class ExecuteAzureMonitorPrometheusRangeQuery(BaseAzureMonitorMetricsTool):
                 end_timestamp=params.get("end"),
                 default_time_span_seconds=DEFAULT_TIME_SPAN_SECONDS,
             )
-            step = params.get("step", "")
+            
+            # Calculate step size with smart defaults and validation
+            step = self._calculate_optimal_step_size(params, start, end)
             output_type = params.get("output_type", "Plain")
             
             url = urljoin(self.toolset.config.azure_monitor_workspace_endpoint, "api/v1/query_range")
@@ -511,6 +519,87 @@ class ExecuteAzureMonitorPrometheusRangeQuery(BaseAzureMonitorMetricsTool):
                 error=f"Unexpected error executing range query: {str(e)}",
                 params=params,
             )
+
+    def _calculate_optimal_step_size(self, params: Any, start_time: str, end_time: str) -> int:
+        """
+        Calculate optimal step size based on time range and configuration limits.
+        
+        Args:
+            params: Query parameters
+            start_time: Start time in RFC3339 format
+            end_time: End time in RFC3339 format
+            
+        Returns:
+            int: Step size in seconds
+        """
+        try:
+            # Get user-provided step if any
+            user_step = params.get("step")
+            if user_step:
+                # Convert to integer if it's a string or float
+                try:
+                    user_step = int(float(user_step))
+                except (ValueError, TypeError):
+                    logging.warning(f"Invalid step size provided: {user_step}, using default")
+                    user_step = None
+            
+            # Parse timestamps to calculate time range
+            start_dt = dateutil.parser.parse(start_time)
+            end_dt = dateutil.parser.parse(end_time)
+            time_range_seconds = int((end_dt - start_dt).total_seconds())
+            
+            # Get configuration values
+            config = self.toolset.config
+            default_step = config.default_step_seconds if config else 3600
+            min_step = config.min_step_seconds if config else 60
+            max_data_points = config.max_data_points if config else 1000
+            
+            # If user provided a step, validate it
+            if user_step is not None:
+                # Ensure it's not below minimum
+                if user_step < min_step:
+                    logging.warning(f"Step size {user_step}s is below minimum {min_step}s, using minimum")
+                    user_step = min_step
+                
+                # Check if it would exceed max data points
+                estimated_points = time_range_seconds / user_step
+                if estimated_points > max_data_points:
+                    # Calculate minimum step to stay within data point limit
+                    min_step_for_limit = max(time_range_seconds / max_data_points, min_step)
+                    logging.warning(
+                        f"Step size {user_step}s would generate ~{estimated_points:.0f} data points "
+                        f"(max: {max_data_points}). Adjusting to {min_step_for_limit:.0f}s"
+                    )
+                    return int(min_step_for_limit)
+                
+                return user_step
+            
+            # No user step provided, calculate smart default
+            # For very short ranges (< 6 hours), allow more granular data
+            if time_range_seconds <= 6 * 3600:  # 6 hours
+                suggested_step = max(time_range_seconds / 360, min_step)  # ~360 points max
+            # For medium ranges (6-24 hours), use 1 hour steps
+            elif time_range_seconds <= 24 * 3600:  # 24 hours
+                suggested_step = default_step  # 1 hour
+            # For longer ranges, increase step size to maintain reasonable data point count
+            else:
+                suggested_step = max(time_range_seconds / max_data_points, default_step)
+            
+            # Ensure we don't go below minimum step
+            suggested_step = max(suggested_step, min_step)
+            
+            # Log the decision for debugging
+            estimated_points = time_range_seconds / suggested_step
+            logging.debug(
+                f"Calculated step size: {suggested_step:.0f}s for time range {time_range_seconds}s "
+                f"(~{estimated_points:.0f} data points)"
+            )
+            
+            return int(suggested_step)
+            
+        except Exception as e:
+            logging.warning(f"Failed to calculate optimal step size: {e}, using default {default_step}")
+            return self.toolset.config.default_step_seconds if self.toolset.config else 3600
 
     def get_parameterized_one_liner(self, params) -> str:
         query = params.get("query", "")
@@ -671,6 +760,9 @@ class AzureMonitorMetricsToolset(Toolset):
             cluster_name="your-aks-cluster-name",
             auto_detect_cluster=True,
             cache_duration_seconds=1800,
-            tool_calls_return_data=True
+            tool_calls_return_data=True,
+            default_step_seconds=3600,  # 1 hour default step size
+            min_step_seconds=60,        # Minimum 1 minute step size
+            max_data_points=1000        # Maximum data points per query
         )
         return example_config.model_dump()
