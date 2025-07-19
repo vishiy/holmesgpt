@@ -12,6 +12,7 @@ from pydantic import BaseModel, field_validator
 from requests import RequestException
 from datetime import datetime
 import dateutil.parser
+import dateutil.relativedelta
 
 from holmes.core.tools import (
     CallablePrerequisite,
@@ -925,6 +926,7 @@ class AzureMonitorMetricsToolset(Toolset):
                 CheckAzureMonitorPrometheusEnabled(toolset=self),
                 GetActivePrometheusAlerts(toolset=self),
                 ExecuteAzureMonitorPrometheusQuery(toolset=self),
+                ExecuteAlertPromQLQuery(toolset=self),
                 ExecuteAzureMonitorPrometheusRangeQuery(toolset=self),
             ],
             tags=[
